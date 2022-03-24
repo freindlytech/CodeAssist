@@ -1,6 +1,7 @@
 package com.tyron.code.ui.project;
 
 import android.Manifest;
+import android.app.Dialog;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -16,6 +17,7 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
 import androidx.core.content.ContextCompat;
 import androidx.core.view.ViewKt;
 import androidx.core.widget.NestedScrollView;
@@ -70,6 +72,8 @@ public class ProjectManagerFragment extends Fragment {
 
     private String mPreviousPath;
 
+    private FilePickerDialogFixed mDirectoryPickerDialog;
+
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -115,7 +119,6 @@ public class ProjectManagerFragment extends Fragment {
             int id = item.getItemId();
 
             if (id == R.id.projects_path) {
-                setSavePath(null);
                 checkSavePath();
                 return true;
             }
@@ -242,6 +245,16 @@ public class ProjectManagerFragment extends Fragment {
         loadProjects();
     }
 
+    @VisibleForTesting
+    String getPreviousPath() {
+        return mPreviousPath;
+    }
+
+    @VisibleForTesting
+    FilePickerDialogFixed getDirectoryPickerDialog() {
+        return mDirectoryPickerDialog;
+    }
+
     private void showDirectorySelectDialog() {
         DialogProperties properties = new DialogProperties();
         properties.selection_type = DialogConfigs.DIR_SELECT;
@@ -256,8 +269,13 @@ public class ProjectManagerFragment extends Fragment {
             setSavePath(files[0]);
             loadProjects();
         });
-        dialogFixed.setOnDismissListener(__ -> mPreviousPath = dialogFixed.getCurrentPath());
+        dialogFixed.setOnDismissListener(__ -> {
+            mPreviousPath = dialogFixed.getCurrentPath();
+            mDirectoryPickerDialog = null;
+        });
         dialogFixed.show();
+
+        mDirectoryPickerDialog = dialogFixed;
     }
 
     private boolean permissionsGranted() {

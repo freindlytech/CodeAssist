@@ -18,6 +18,7 @@ import com.tyron.builder.project.api.Module;
 import com.tyron.code.ApplicationLoader;
 import com.tyron.code.template.CodeTemplate;
 import com.tyron.code.util.ProjectUtils;
+import com.tyron.common.logging.IdeLog;
 import com.tyron.completion.index.CompilerService;
 import com.tyron.completion.java.compiler.CompilerContainer;
 import com.tyron.completion.java.JavaCompilerProvider;
@@ -29,17 +30,22 @@ import com.tyron.completion.xml.XmlRepository;
 import com.tyron.completion.xml.task.InjectResourcesTask;
 
 import org.apache.commons.io.FileUtils;
-import org.eclipse.lemminx.dom.DOMParser;
 
 import java.io.File;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Executors;
+import java.util.logging.Logger;
+
+import kotlin.collections.CollectionsKt;
 
 public class ProjectManager {
+
+    private static final Logger LOG = IdeLog.getCurrentLogger(ProjectManager.class);
 
     public interface TaskListener {
         void onTaskStarted(String message);
@@ -109,6 +115,7 @@ public class ProjectManager {
         }
 
         try {
+            mCurrentProject.setIndexing(true);
             mCurrentProject.index();
         } catch (IOException exception) {
             logger.warning("Failed to open project: " + exception.getMessage());
@@ -130,9 +137,9 @@ public class ProjectManager {
             mListener.onTaskStarted("Generating resource files.");
 
             ManifestMergeTask manifestMergeTask =
-                    new ManifestMergeTask((AndroidModule) module, logger);
+                    new ManifestMergeTask(project, (AndroidModule) module, logger);
             IncrementalAapt2Task task =
-                    new IncrementalAapt2Task((AndroidModule) module, logger, false);
+                    new IncrementalAapt2Task(project, (AndroidModule) module, logger, false);
             try {
                 manifestMergeTask.prepare(BuildType.DEBUG);
                 manifestMergeTask.run();
@@ -143,6 +150,7 @@ public class ProjectManager {
                 logger.warning("Unable to generate resource classes " + e.getMessage());
             }
         }
+
         if (module instanceof JavaModule) {
             if (module instanceof AndroidModule) {
                 mListener.onTaskStarted("Indexing XML files.");
@@ -155,7 +163,10 @@ public class ProjectManager {
                 try {
                     xmlRepository.initialize((AndroidModule) module);
                 } catch (IOException e) {
-                    // ignored
+                    String message = "Unable to initialize resource repository. " +
+                                     "Resource code completion might be incomplete or unavailable. \n" +
+                                     "Reason: " + e.getMessage();
+                    LOG.warning(message);
                 }
             }
 
@@ -166,15 +177,14 @@ public class ProjectManager {
                 JavaCompilerService service = provider.get(project, module);
 
                 if (module instanceof AndroidModule) {
-                    InjectResourcesTask injectTask =
-                            new InjectResourcesTask(project, (AndroidModule) module);
-                    injectTask.inject(file -> {
-                        if (service != null) {
-                            service.compile(Collections.singletonList(
-                                    new SourceFileObject(file.toPath(), (JavaModule) null,
-                                                         Instant.now())));
-                        }
-                    });
+                    InjectResourcesTask.inject(project, (AndroidModule) module);
+                }
+
+                JavaModule javaModule = ((JavaModule) module);
+                Collection<File> files = javaModule.getJavaFiles().values();
+                File first = CollectionsKt.firstOrNull(files);
+                if (first != null) {
+                    service.compile(first.toPath());
                 }
             } catch (Throwable e) {
                 String message =
@@ -183,6 +193,7 @@ public class ProjectManager {
             }
         }
 
+        mCurrentProject.setIndexing(false);
         mListener.onComplete(project, true, "Index successful");
     }
 

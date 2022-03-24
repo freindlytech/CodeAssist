@@ -22,16 +22,16 @@ import com.tyron.completion.model.CompletionList;
 import com.tyron.completion.progress.ProcessCanceledException;
 
 import org.jetbrains.kotlin.com.intellij.util.ProcessingContext;
-import org.openjdk.source.tree.CaseTree;
-import org.openjdk.source.tree.CompilationUnitTree;
-import org.openjdk.source.tree.IdentifierTree;
-import org.openjdk.source.tree.ParameterizedTypeTree;
-import org.openjdk.source.tree.ReturnTree;
-import org.openjdk.source.tree.Tree;
-import org.openjdk.source.util.JavacTask;
-import org.openjdk.source.util.TreePath;
-import org.openjdk.source.util.Trees;
-import org.openjdk.tools.javac.tree.JCTree;
+import com.sun.source.tree.CaseTree;
+import com.sun.source.tree.CompilationUnitTree;
+import com.sun.source.tree.IdentifierTree;
+import com.sun.source.tree.ParameterizedTypeTree;
+import com.sun.source.tree.ReturnTree;
+import com.sun.source.tree.Tree;
+import com.sun.source.util.JavacTask;
+import com.sun.source.util.TreePath;
+import com.sun.source.util.Trees;
+import com.sun.tools.javac.tree.JCTree;
 
 import java.io.File;
 import java.nio.file.Path;
@@ -98,6 +98,9 @@ public class Completions {
         boolean endsWithParen = endsWithParen(contents, (int) cursor);
 
         checkCanceled();
+        if (compiler.getCachedContainer().isWriting()) {
+            return null;
+        }
         CompilerContainer container = compiler.compile(Collections.singletonList(source));
         try {
             return container.get(task -> {
@@ -133,6 +136,7 @@ public class Completions {
                 if (INSIDE_PARAMETERIZED.accepts(path.getLeaf(), context)) {
                     new ClassNameCompletionProvider(compiler)
                             .complete(builder, task, path, partial, endsWithParen);
+                    break;
                 } else if (SWITCH_CONSTANT.accepts(path.getLeaf(), context)) {
                     new SwitchConstantCompletionProvider(compiler)
                             .complete(builder, task, path, partial, endsWithParen);

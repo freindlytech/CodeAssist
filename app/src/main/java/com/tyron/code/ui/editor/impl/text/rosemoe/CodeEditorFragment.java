@@ -22,6 +22,7 @@ import androidx.fragment.app.Fragment;
 import androidx.lifecycle.ViewModelProvider;
 import androidx.lifecycle.ViewModelStoreOwner;
 
+import com.android.tools.r8.graph.V;
 import com.google.android.material.snackbar.Snackbar;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
@@ -34,6 +35,7 @@ import com.tyron.actions.util.DataContextUtils;
 import com.tyron.builder.log.LogViewModel;
 import com.tyron.builder.model.DiagnosticWrapper;
 import com.tyron.builder.project.Project;
+import com.tyron.builder.project.api.AndroidModule;
 import com.tyron.builder.project.api.FileManager;
 import com.tyron.builder.project.api.Module;
 import com.tyron.builder.project.listener.FileListener;
@@ -44,11 +46,11 @@ import com.tyron.code.ui.editor.CodeAssistCompletionLayout;
 import com.tyron.code.ui.editor.EditorViewModel;
 import com.tyron.code.ui.editor.Savable;
 import com.tyron.code.ui.editor.impl.FileEditorManagerImpl;
-import com.tyron.code.ui.editor.language.LanguageManager;
-import com.tyron.code.ui.editor.language.java.JavaLanguage;
-import com.tyron.code.ui.editor.language.textmate.BaseTextmateAnalyzer;
-import com.tyron.code.ui.editor.language.textmate.EmptyTextMateLanguage;
-import com.tyron.code.ui.editor.language.xml.LanguageXML;
+import com.tyron.code.language.LanguageManager;
+import com.tyron.code.language.java.JavaLanguage;
+import com.tyron.code.analyzer.BaseTextmateAnalyzer;
+import com.tyron.code.language.textmate.EmptyTextMateLanguage;
+import com.tyron.code.language.xml.LanguageXML;
 import com.tyron.code.ui.editor.scheme.CompiledEditorScheme;
 import com.tyron.code.ui.editor.shortcuts.ShortcutAction;
 import com.tyron.code.ui.editor.shortcuts.ShortcutItem;
@@ -59,19 +61,35 @@ import com.tyron.code.ui.theme.ThemeRepository;
 import com.tyron.code.util.CoordinatePopupMenu;
 import com.tyron.code.util.PopupMenuHelper;
 import com.tyron.common.SharedPreferenceKeys;
+import com.tyron.common.logging.IdeLog;
 import com.tyron.common.util.AndroidUtilities;
 import com.tyron.completion.java.util.DiagnosticUtil;
 import com.tyron.completion.java.util.JavaDataContextUtil;
 import com.tyron.completion.progress.ProgressManager;
 import com.tyron.editor.CharPosition;
+import com.tyron.kotlin_completion.CompletionEngine;
 
 import org.apache.commons.io.FileUtils;
+import org.jetbrains.kotlin.backend.common.psi.PsiSourceManager;
+import org.jetbrains.kotlin.com.intellij.openapi.components.ServiceManager;
+import org.jetbrains.kotlin.com.intellij.openapi.editor.event.DocumentEvent;
+import org.jetbrains.kotlin.com.intellij.openapi.editor.impl.event.DocumentEventImpl;
+import org.jetbrains.kotlin.com.intellij.openapi.vfs.VirtualFile;
+import org.jetbrains.kotlin.com.intellij.openapi.vfs.local.CoreLocalFileSystem;
+import org.jetbrains.kotlin.com.intellij.psi.AbstractFileViewProvider;
+import org.jetbrains.kotlin.com.intellij.psi.FileViewProvider;
+import org.jetbrains.kotlin.com.intellij.psi.PsiDocumentManager;
+import org.jetbrains.kotlin.com.intellij.psi.PsiManager;
+import org.jetbrains.kotlin.com.intellij.util.DocumentEventUtil;
+import org.jetbrains.kotlin.com.intellij.util.FileContentUtilCore;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.Optional;
 import java.util.concurrent.Executors;
+import java.util.logging.Logger;
 
 import io.github.rosemoe.sora.event.ClickEvent;
 import io.github.rosemoe.sora.event.ContentChangeEvent;
@@ -80,6 +98,7 @@ import io.github.rosemoe.sora.lang.Language;
 import io.github.rosemoe.sora.langs.textmate.theme.TextMateColorScheme;
 import io.github.rosemoe.sora.text.Content;
 import io.github.rosemoe.sora.text.Cursor;
+import io.github.rosemoe.sora.widget.CodeEditor;
 import io.github.rosemoe.sora.widget.DirectAccessProps;
 import io.github.rosemoe.sora.widget.component.EditorAutoCompletion;
 import io.github.rosemoe.sora.widget.schemes.EditorColorScheme;
@@ -89,6 +108,8 @@ import io.github.rosemoe.sora2.text.EditorUtil;
 public class CodeEditorFragment extends Fragment implements Savable,
         SharedPreferences.OnSharedPreferenceChangeListener, FileListener,
         ProjectManager.OnProjectOpenListener {
+
+    private static final Logger LOG = IdeLog.getCurrentLogger(CodeEditorFragment.class);
 
     public static final String KEY_LINE = "line";
     public static final String KEY_COLUMN = "column";
@@ -276,6 +297,9 @@ public class CodeEditorFragment extends Fragment implements Savable,
     }
 
     private void configureEditor(@NonNull CodeEditorView editor) {
+        // do not allow the user to edit, since at the time this is called
+        // the contents may still be loading.
+        editor.setEditable(false);
         editor.setColorScheme(new CompiledEditorScheme(requireContext()));
         editor.setBackgroundAnalysisEnabled(false);
         editor.setTypefaceText(
@@ -316,7 +340,26 @@ public class CodeEditorFragment extends Fragment implements Savable,
             event.intercept();
 
             updateFile(mEditor.getText());
-            // wait for the cursor to move
+            Cursor cursor = mEditor.getCursor();
+            if (cursor.isSelected()) {
+                int index = mEditor.getCharIndex(event.getLine(), event.getColumn());
+                int cursorLeft = cursor.getLeft();
+                int cursorRight = cursor.getRight();
+                char c = mEditor.getText().charAt(index);
+                if (Character.isWhitespace(c)) {
+                    mEditor.setSelection(event.getLine(), event.getColumn());
+                } else if (index < cursorLeft || index > cursorRight) {
+                    EditorUtil.selectWord(mEditor, event.getLine(), event.getColumn());
+                }
+            } else {
+                char c = mEditor.getText().charAt(event.getIndex());
+                if (!Character.isWhitespace(c)) {
+                    EditorUtil.selectWord(mEditor, event.getLine(), event.getColumn());
+                } else {
+                    mEditor.setSelection(event.getLine(), event.getColumn());
+                }
+            }
+
             ProgressManager.getInstance().runLater(() -> {
                 showPopupMenu(event);
             });
@@ -400,22 +443,11 @@ public class CodeEditorFragment extends Fragment implements Savable,
         }
     }
 
+    /**
+     * Show the popup menu with the actions api
+     */
     private void showPopupMenu(LongPressEvent event) {
         MotionEvent e = event.getCausingEvent();
-        Cursor cursor = mEditor.getCursor();
-        if (cursor.isSelected()) {
-            int index = mEditor.getCharIndex(event.getLine(), event.getColumn());
-            int cursorLeft = cursor.getLeft();
-            int cursorRight = cursor.getRight();
-            char c = mEditor.getText().charAt(index);
-            if (Character.isWhitespace(c)) {
-                mEditor.setSelection(event.getLine(), event.getColumn());
-            } else if (index < cursorLeft || index > cursorRight) {
-                EditorUtil.selectWord(mEditor, event.getLine(), event.getColumn());
-            }
-        } else {
-            EditorUtil.selectWord(mEditor, event.getLine(), event.getColumn());
-        }
         CoordinatePopupMenu popupMenu =
                 new CoordinatePopupMenu(requireContext(), mEditor, Gravity.BOTTOM);
         DataContext dataContext = createDataContext();
@@ -423,6 +455,9 @@ public class CodeEditorFragment extends Fragment implements Savable,
                 .fillMenu(dataContext, popupMenu.getMenu(), ActionPlaces.EDITOR, true, false);
         popupMenu.show((int) e.getX(), ((int) e.getY()) - AndroidUtilities.dp(24));
 
+        // we don't want to enable the drag to open listener right away,
+        // this may cause the buttons to be clicked right away
+        // so wait for a few ms
         ProgressManager.getInstance().runLater(() -> {
             popupMenu.setOnDismissListener(d -> mDragToOpenListener = null);
             mDragToOpenListener = popupMenu.getDragToOpenListener();
@@ -460,22 +495,7 @@ public class CodeEditorFragment extends Fragment implements Savable,
 
         hideEditorWindows();
 
-        if (mCanSave && !mReading) {
-            if (ProjectManager.getInstance().getCurrentProject() != null) {
-                ProjectManager.getInstance().getCurrentProject().getModule(mCurrentFile)
-                        .getFileManager()
-                        .setSnapshotContent(mCurrentFile, mEditor.getText().toString(), false);
-            } else {
-                ProgressManager.getInstance().runNonCancelableAsync(() -> {
-                    try {
-                        FileUtils.writeStringToFile(mCurrentFile, mEditor.getText().toString(),
-                                                    StandardCharsets.UTF_8);
-                    } catch (IOException e) {
-                        // ignored
-                    }
-                });
-            }
-        }
+        save(true);
     }
 
     @Override
@@ -505,11 +525,17 @@ public class CodeEditorFragment extends Fragment implements Savable,
     }
 
     @Override
+    public boolean canSave() {
+        return mCanSave && !mReading;
+    }
+
+    @Override
     public void save(boolean toDisk) {
         if (!mCanSave || mReading) {
             return;
         }
 
+        // don't save if the file has been deleted externally but its still opened in the editor,
         if (!mCurrentFile.exists()) {
             return;
         }
@@ -524,7 +550,8 @@ public class CodeEditorFragment extends Fragment implements Savable,
                     FileUtils.writeStringToFile(mCurrentFile, mEditor.getText().toString(),
                                                 StandardCharsets.UTF_8);
                 } catch (IOException e) {
-                    // ignored
+                    LOG.severe("Unable to save file: " + mCurrentFile.getAbsolutePath() + "\n" +
+                               "Reason: " + e.getMessage());
                 }
             });
         }
@@ -535,6 +562,10 @@ public class CodeEditorFragment extends Fragment implements Savable,
         ProgressManager.getInstance().runLater(() -> readFile(project, mSavedInstanceState));
     }
 
+    /**
+     * Read the file immediately if there is a project open. If not, wait for the project
+     * to be opened first.
+     */
     private void readOrWait() {
         if (ProjectManager.getInstance().getCurrentProject() != null) {
             readFile(ProjectManager.getInstance().getCurrentProject(), mSavedInstanceState);
@@ -556,6 +587,7 @@ public class CodeEditorFragment extends Fragment implements Savable,
         FileManager fileManager = module.getFileManager();
         fileManager.addSnapshotListener(this);
 
+        // the file is already opened, so no need to load it.
         if (fileManager.isOpened(mCurrentFile)) {
             Optional<CharSequence> contents = fileManager.getFileContent(mCurrentFile);
             if (contents.isPresent()) {
@@ -580,6 +612,7 @@ public class CodeEditorFragment extends Fragment implements Savable,
                 }
                 mCanSave = true;
                 mEditor.setBackgroundAnalysisEnabled(true);
+                mEditor.setEditable(true);
                 fileManager.openFileForSnapshot(mCurrentFile, result);
 
                 Bundle bundle = new Bundle();
@@ -597,9 +630,6 @@ public class CodeEditorFragment extends Fragment implements Savable,
                         setCursorPosition(line, column);
                     }
                 }
-
-                mEditor.setEditable(true);
-
                 checkCanSave();
             }
 
@@ -610,6 +640,9 @@ public class CodeEditorFragment extends Fragment implements Savable,
                 if (getContext() != null) {
                     checkCanSave();
                 }
+
+                LOG.severe("Unable to read current file: " + mCurrentFile + "\n" +
+                           "Reason: " + t.getMessage());
             }
         }, ContextCompat.getMainExecutor(requireContext()));
     }
@@ -735,6 +768,10 @@ public class CodeEditorFragment extends Fragment implements Savable,
         }
     }
 
+    /**
+     * Create the data context specific to this fragment for use with the actions API.
+     * @return the data context.
+     */
     private DataContext createDataContext() {
         Project currentProject = ProjectManager.getInstance().getCurrentProject();
 
@@ -751,7 +788,9 @@ public class CodeEditorFragment extends Fragment implements Savable,
         }
 
         DiagnosticWrapper diagnosticWrapper = DiagnosticUtil
-                .getDiagnosticWrapper(mEditor.getDiagnostics(), mEditor.getCursor().getLeft());
+                .getDiagnosticWrapper(mEditor.getDiagnostics(),
+                                      mEditor.getCursor().getLeft(),
+                                      mEditor.getCursor().getRight());
         if (diagnosticWrapper == null && mLanguage instanceof LanguageXML) {
             diagnosticWrapper = DiagnosticUtil.getXmlDiagnosticWrapper(mEditor.getDiagnostics(),
                                                                        mEditor.getCursor()
