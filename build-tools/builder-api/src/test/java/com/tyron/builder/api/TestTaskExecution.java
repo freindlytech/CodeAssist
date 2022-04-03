@@ -1,173 +1,198 @@
 package com.tyron.builder.api;
 
-import com.tyron.builder.api.execution.TaskExecutionGraph;
-import com.tyron.builder.api.execution.plan.DefaultExecutionPlan;
-import com.tyron.builder.api.execution.plan.DefaultNodeValidator;
-import com.tyron.builder.api.execution.plan.DependencyResolver;
-import com.tyron.builder.api.execution.plan.ExecutionNodeAccessHierarchy;
-import com.tyron.builder.api.execution.plan.ExecutionPlan;
-import com.tyron.builder.api.execution.plan.Node;
-import com.tyron.builder.api.execution.plan.NodeExecutor;
-import com.tyron.builder.api.execution.plan.PlanExecutor;
-import com.tyron.builder.api.execution.plan.TaskDependencyResolver;
-import com.tyron.builder.api.execution.plan.TaskNodeDependencyResolver;
-import com.tyron.builder.api.execution.plan.TaskNodeFactory;
-import com.tyron.builder.api.internal.execution.DefaultTaskExecutionGraph;
-import com.tyron.builder.api.internal.file.FileException;
-import com.tyron.builder.api.internal.file.FileMetadata;
-import com.tyron.builder.api.internal.file.FileType;
-import com.tyron.builder.api.internal.file.Stat;
-import com.tyron.builder.api.internal.project.AbstractProject;
-import com.tyron.builder.api.internal.snapshot.CaseSensitivity;
-import com.tyron.builder.api.internal.tasks.CircularDependencyException;
+import com.tyron.builder.api.internal.DefaultGradle;
+import com.tyron.builder.api.internal.Describables;
+import com.tyron.builder.api.internal.MutableBoolean;
+import com.tyron.builder.api.internal.StartParameterInternal;
+import com.tyron.builder.api.internal.execution.TaskExecutionGraphInternal;
+import com.tyron.builder.api.internal.initialization.DefaultProjectDescriptor;
+import com.tyron.builder.api.internal.project.DefaultProjectOwner;
+import com.tyron.builder.api.internal.project.ProjectFactory;
+import com.tyron.builder.api.internal.project.ProjectInternal;
+import com.tyron.builder.api.internal.resources.ResourceLock;
+import com.tyron.builder.api.internal.reflect.service.DefaultServiceRegistry;
+import com.tyron.builder.api.internal.reflect.service.ServiceRegistry;
+import com.tyron.builder.api.internal.reflect.service.scopes.BuildScopeServiceRegistryFactory;
+import com.tyron.builder.api.internal.reflect.service.scopes.BuildScopeServices;
+import com.tyron.builder.api.internal.reflect.service.scopes.ServiceRegistryFactory;
 import com.tyron.builder.api.internal.tasks.DefaultTaskContainer;
-import com.tyron.builder.api.internal.tasks.NodeExecutionContext;
 import com.tyron.builder.api.internal.tasks.TaskExecutor;
-import com.tyron.builder.api.internal.tasks.WorkDependencyResolver;
+import com.tyron.builder.api.internal.tasks.properties.PropertyWalker;
+import com.tyron.builder.api.project.BuildProject;
+import com.tyron.builder.api.tasks.TaskContainer;
+import com.tyron.builder.api.util.Path;
+import com.tyron.common.TestUtil;
 
 import org.junit.Before;
 import org.junit.Test;
 
 import java.io.File;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
+import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * WIP
  */
 public class TestTaskExecution {
 
+    private final ResourceLock lock = new DefaultLock();
+    ProjectInternal project;
+
     private DefaultTaskContainer container;
 
     @Before
-    public void setup() {
-        AbstractProject project = new AbstractProject() {
+    public void setup() throws IOException {
+        File resourcesDirectory = TestUtil.getResourcesDirectory();
+        StartParameterInternal startParameter = new StartParameterInternal() {};
+
+        DefaultServiceRegistry global = new DefaultServiceRegistry();
+        global.register(registration -> {
+            registration.add(PropertyWalker.class, (instance, validationContext, visitor) -> {
+
+            });
+        });
+        BuildScopeServices buildScopeServices = new BuildScopeServices(global);
+        BuildScopeServiceRegistryFactory registryFactory =
+                new BuildScopeServiceRegistryFactory(buildScopeServices);
+
+        DefaultGradle gradle = new DefaultGradle(null, startParameter, registryFactory) {
+
+            private ServiceRegistry registry;
+            private ServiceRegistryFactory factory;
+            private TaskExecutionGraphInternal taskExecutionGraph;
+
+            @Override
+            public TaskExecutionGraphInternal getTaskGraph() {
+                if (taskExecutionGraph == null) {
+                    taskExecutionGraph = getServices().get(TaskExecutionGraphInternal.class);
+                }
+                return taskExecutionGraph;
+            }
+
+            @Override
+            public ServiceRegistry getServices() {
+                if (registry == null) {
+                    registry = registryFactory.createFor(this);
+                }
+                return registry;
+            }
+
+            @Override
+            public ServiceRegistryFactory getServiceRegistryFactory() {
+                if (factory == null) {
+                    factory = getServices().get(ServiceRegistryFactory.class);
+                }
+                return factory;
+            }
         };
-        container = (DefaultTaskContainer) project.getTaskContainer();
+
+        global.add(gradle);
+
+        ProjectFactory projectFactory = gradle.getServices().get(ProjectFactory.class);
+        DefaultProjectOwner owner = DefaultProjectOwner.builder()
+                .setProjectDir(resourcesDirectory)
+                .setProjectPath(Path.ROOT)
+                .setDisplayName(Describables.of("TestProject"))
+                .setTaskExecutionLock(lock)
+                .setAccessLock(lock)
+                .build();
+        project = projectFactory.createProject(
+                gradle,
+                new DefaultProjectDescriptor("TestProject"),
+                owner,
+                null
+        );
+        container = (DefaultTaskContainer) this.project.getTasks();
     }
 
     @Test
-    public void testTaskDependency() {
-        List<Task> executedTasks = new ArrayList<>();
-
-        container.register("task1", task -> {
-            task.doLast(executedTasks::add);
-            task.dependsOn("task2");
-        });
-
-        container.register("task2", task -> {
-            task.doLast(executedTasks::add);
-        });
-
-        container.register("task3", task -> {
-            task.doLast(executedTasks::add);
-            task.dependsOn("task1");
-        });
-
-        TaskNodeFactory taskNodeFactory = new TaskNodeFactory(new DefaultNodeValidator());
-        TaskDependencyResolver resolver = new TaskDependencyResolver(Collections.singletonList(new TaskNodeDependencyResolver(taskNodeFactory)));
-        ExecutionNodeAccessHierarchy executionNodeAccessHierarchy = new ExecutionNodeAccessHierarchy(
-                CaseSensitivity.CASE_INSENSITIVE, new Stat() {
-            @Override
-            public int getUnixMode(File f) throws FileException {
-                return 0;
-            }
-
-            @Override
-            public FileMetadata stat(File f) throws FileException {
-                return new FileMetadata() {
-                    @Override
-                    public FileType getType() {
-                        if (!f.exists()) {
-                            return FileType.Missing;
-                        }
-                        if (f.isDirectory()) {
-                            return FileType.Directory;
-                        }
-                        return FileType.RegularFile;
-                    }
-
-                    @Override
-                    public long getLastModified() {
-                        return f.lastModified();
-                    }
-
-                    @Override
-                    public long getLength() {
-                        return f.length();
-                    }
-
-                    @Override
-                    public AccessType getAccessType() {
-                        if (f.isAbsolute()) {
-                            return AccessType.DIRECT;
-                        }
-                        return AccessType.VIA_SYMLINK;
-                    }
-                };
-            }
-        });
-        DefaultExecutionPlan executionPlan = new DefaultExecutionPlan("myPlan", taskNodeFactory, resolver, executionNodeAccessHierarchy,
-                                                                      executionNodeAccessHierarchy);
-        executionPlan.addEntryTasks(Collections.singletonList(container.resolveTask("task3")));
-        executionPlan.determineExecutionPlan();
-
-        DefaultTaskExecutionGraph graph = new DefaultTaskExecutionGraph(new PlanExecutor() {
-            @Override
-            public void process(ExecutionPlan executionPlan,
-                                Collection<? super Throwable> failures,
-                                Action<Node> nodeExecutor) {
-
-            }
-
-            @Override
-            public void assertHealthy() {
-
-            }
-        }, Collections.singletonList((node, context) -> false));
-        graph.populate(executionPlan);
-
-        List<Throwable> failures = new ArrayList<>();
-        graph.execute(executionPlan, failures);
-
-        assert failures.isEmpty();
+    public void testProjectCreation() {
+        assert project != null;
     }
 
     @Test
-    public void testNoCircularDependency() {
-        container.register("task1", task -> {
-            task.dependsOn("task2");
-        });
-        container.register("task2", task -> {
-            task.dependsOn("task1");
-        });
+    public void testProject() {
+        Action<BuildProject> evaluationAction = project -> {
+            TaskContainer tasks = project.getTasks();
+            tasks.register("MyTask", task -> {
+                task.doLast(__ -> {
+                    System.out.println("Running " + task.getName());
+                });
+            });
+        };
+        evaluateProject(project, evaluationAction);
+
+        executeProject(project, "MyTask");
+    }
+
+    @Test
+    public void testSkipOnlyIf() {
+        MutableBoolean executed = new MutableBoolean(false);
+        Action<BuildProject> evaluationAction = project -> {
+            TaskContainer tasks = project.getTasks();
+            tasks.register("SkipTask", task -> {
+                task.onlyIf(t -> false);
+                task.doLast(__ -> executed.set(true));
+            });
+        };
+
+        evaluateProject(project, evaluationAction);
+        executeProject(project, "SkipTask");
+
+        assert !executed.get();
+    }
+
+    private void evaluateProject(ProjectInternal project, Action<BuildProject> evaluationAction) {
+        project.getState().toBeforeEvaluate();
+        project.getState().toEvaluate();
         try {
-            TaskExecutor taskExecutor = new TaskExecutor(container);
-            taskExecutor.execute("task1");
-        } catch (CircularDependencyException expected) {
-            return;
+            evaluationAction.execute(project);
+        } catch (Throwable e) {
+            project.getState().failed(new ProjectConfigurationException("Failed to evaluate project.", e));
         }
 
-        throw new AssertionError("Circular dependency was not detected.");
-    }
+        project.getState().toAfterEvaluate();
 
-    private void assertExecutionOrder(List<Task> tasks, String... executionOrder) {
-        if (tasks.size() != executionOrder.length) {
-            throw new AssertionError("Expected " + executionOrder.length + " but got " + tasks.size());
-        }
-
-        for (int i = 0; i < executionOrder.length; i++) {
-            Task task = tasks.get(i);
-            String name = executionOrder[i];
-
-            if (!task.getName().equals(name)) {
-                throw new AssertionError("Execution order not met. Tasks ran: " + tasks + "\n" +
-                                         "Expected order: " + Arrays.toString(executionOrder));
-            }
+        if (!project.getState().hasFailure()) {
+            project.getState().configured();
         }
     }
 
+    private void executeProject(ProjectInternal project, String... taskNames) {
+        TaskExecutor taskExecutor = new TaskExecutor(project);
+        taskExecutor.execute(taskNames);
+        List<Throwable> failures = taskExecutor.getFailures();
+        assert  failures.isEmpty() : "Project execution failure: " + failures;
+    }
+
+    private static class DefaultLock implements ResourceLock {
+
+        private final ReentrantLock lock = new ReentrantLock();
+
+        @Override
+        public boolean isLocked() {
+            return lock.isLocked();
+        }
+
+        @Override
+        public boolean isLockedByCurrentThread() {
+            return lock.isHeldByCurrentThread();
+        }
+
+        @Override
+        public boolean tryLock() {
+            return lock.tryLock();
+        }
+
+        @Override
+        public void unlock() {
+            lock.unlock();
+        }
+
+        @Override
+        public String getDisplayName() {
+            return lock.toString();
+        }
+    }
 }
